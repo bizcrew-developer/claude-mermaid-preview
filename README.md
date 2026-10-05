@@ -26,4 +26,4 @@ Then start a new session. Phones viewing a session that runs on one of these com
 ## Notes
 
 - Buttons show in the desktop app and VS Code. The terminal has no buttons, so use `/mermaid-preview` there; diagrams are drawn only on surfaces that support images.
-- Diagrams are drawn with a white background so they stay readable in dark mode.
+- Diagrams are drawn exactly as written, with their own theme and colours on a transparent background.

@@ -147,7 +147,7 @@ async function renderDiagram($: EngineInterface, code: string): Promise<Block> {
     const sep = isWindows ? '\\' : '/'
     const config = `${$.plugin.root}${sep}hooks${sep}mermaid-config.json`
     const r = await $.process.run(
-      [...mmdc.argv, '-i', '-', '-o', '-', '-e', 'svg', '-b', 'white', '-c', config],
+      [...mmdc.argv, '-i', '-', '-o', '-', '-e', 'svg', '-b', 'transparent', '-c', config],
       { stdin: code, timeoutMs: 60000, ...(mmdc.env ? { env: mmdc.env } : {}) },
     )
     const svg = r.stdout.slice(r.stdout.indexOf('<svg'))
