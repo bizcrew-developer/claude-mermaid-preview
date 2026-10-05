@@ -3,7 +3,8 @@ export type Block =
   | { kind: 'svg'; source: string; alt: string; width: number; height: number }
   | { kind: 'err'; code: string; message: string }
 
-export type Zoom = { source: string; alt: string; width: number; height: number; scale: number }
+// The block shown enlarged in the pane, by its index in `blocks`, and its scale.
+export type Zoom = { index: number; scale: number }
 
 declare module 'claude-code' {
   interface PluginState {

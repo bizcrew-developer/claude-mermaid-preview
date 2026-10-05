@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Block, Zoom } from '../types'
+import type { Block } from '../types'
 
 const PANE = 'mermaid-preview'
 const SVG_LIMIT = 131072
@@ -24,7 +24,7 @@ function split(text: string): Segment[] {
   for (const m of text.matchAll(FENCE)) {
     const start = m.index ?? 0
     if (start > last) out.push({ kind: 'md', text: text.slice(last, start) })
-    out.push({ kind: 'mermaid', code: m[2] })
+    out.push({ kind: 'mermaid', code: m[2] ?? '' })
     last = start + m[0].length
   }
   if (last < text.length) out.push({ kind: 'md', text: text.slice(last) })
@@ -61,7 +61,7 @@ function sizeSvg(svg: string): string {
     .replace(/\swidth="[^"]*"/, '')
     .replace(/\sheight="[^"]*"/, '')
     .replace(/max-width:\s*[\d.]+px;?\s*/, '')
-    .replace(/^<svg/, `<svg width="${Math.ceil(+box[1])}" height="${Math.ceil(+box[2])}"`)
+    .replace(/^<svg/, `<svg width="${Math.ceil(Number(box[1]))}" height="${Math.ceil(Number(box[2]))}"`)
   return tag + svg.slice(open[0].length)
 }
 
@@ -72,7 +72,7 @@ function dirname(path: string): string {
 
 function lastPathLine(stdout: string, isAbs: (l: string) => boolean): string | null {
   const lines = stdout.split(/\r?\n/).map(l => l.trim()).filter(isAbs)
-  return lines.length ? lines[lines.length - 1] : null
+  return lines[lines.length - 1] ?? null
 }
 
 const cache = new Map<string, Block>()
@@ -187,8 +187,8 @@ async function renderDiagram($: EngineInterface, code: string): Promise<Block> {
         kind: 'svg',
         source: svg,
         alt: `Mermaid diagram: ${code.trim().split('\n')[0]}`,
-        width: size ? +size[1] : 800,
-        height: size ? +size[2] : 600,
+        width: Number(size?.[1] ?? 800),
+        height: Number(size?.[2] ?? 600),
       }
     }
   } catch (err) {
@@ -302,12 +302,37 @@ async function withMermaid($: EngineInterface, path: string): Promise<boolean> {
   return yes
 }
 
-// Shows one diagram enlarged in the plan pane itself. A separate pane either
-// took the focus (so the next Expand cost an extra tap) or stayed behind its tab.
-async function openZoom($: EngineInterface, b: Block) {
-  if (b.kind !== 'svg') return
-  const z: Zoom = { source: b.source, alt: b.alt, width: b.width || 800, height: b.height || 600, scale: 1 }
-  await update($, zoom, () => z)
+// After a press redraws the pane, make sure it still holds the keyboard with
+// the ring on `key`: a pane without the keyboard spends the person's next tap
+// taking it back. The single tree below keeps the pressed button, so this is
+// a safety net for a surface that redraws the element anyway.
+async function keepFocus($: EngineInterface, key: string) {
+  await $.clock.sleep(250)
+  const pane = (await $.ui.panes()).find(p => p.id === PANE)
+  if (pane && !pane.isFocused) {
+    const path = await read($, file)
+    await $.ui.open({ id: PANE, title: `Mermaid: ${basename(path ?? PANE)}`, focus: true })
+  }
+  await $.ui.focus({ requestId: PANE, key })
+}
+
+// Expand and Back are one button, drawn under the same key in the same place
+// in both views, so the element the person pressed survives the redraw and
+// the pane keeps the keyboard: one tap each.
+async function toggleZoom($: EngineInterface, index: number) {
+  const key = `zoom-open-${index}`
+  const cur = await read($, zoom)
+  const isOpening = !(cur && cur.index === index)
+  await update($, zoom, () => (isOpening ? { index, scale: 1 } : null))
+  await keepFocus($, key)
+  // Bring the diagram's row to the top: the enlarged view starts there, and
+  // Back returns to the diagram instead of the top of the plan. Right after
+  // the pane reopens the key can briefly read as undrawn, so retry once.
+  const scrolled = await $.ui.scroll({ to: { key }, in: PANE, block: 'start' })
+  if (scrolled.deny) {
+    await $.clock.sleep(250)
+    await $.ui.scroll({ to: { key }, in: PANE, block: 'start' })
+  }
 }
 
 export const register: Register = on => {
@@ -378,45 +403,17 @@ export const register: Register = on => {
     const problem = await read($, error)
     const path = await read($, file)
     const z = await read($, zoom)
-
-    if (z && Svg) {
-      const step = (by: number) => async () => {
-        await update($, zoom, cur =>
-          cur ? { ...cur, scale: SCALES[Math.min(SCALES.length - 1, Math.max(0, SCALES.indexOf(cur.scale) + by))] } : cur,
-        )
-      }
-
-      return (
-        <Box flexDirection="column" gap={1} height={Math.max(10, (e.viewport?.rows ?? 40) - 1)}>
-          <Box flexDirection="row" gap={1} alignItems="center" justifyContent="center">
-            <Button
-              key="zoom-back"
-              label="← Back"
-              onPress={async () => {
-                await update($, zoom, () => null)
-              }}
-            />
-            <Button key="zoom-out" label="−" onPress={step(-1)} />
-            <Text>{Math.round(z.scale * 100)}%</Text>
-            <Button key="zoom-in" label="+" onPress={step(1)} />
-            <Button
-              key="zoom-reset"
-              label="100%"
-              onPress={async () => {
-                await update($, zoom, cur => (cur ? { ...cur, scale: 1 } : cur))
-              }}
-            />
-          </Box>
-          <Box flexGrow={1} flexDirection="column" justifyContent="center" alignItems="center">
-            <Svg
-              source={z.source}
-              alt={z.alt}
-              width={Math.round(z.width * z.scale)}
-              height={Math.round(z.height * z.scale)}
-              isInteractive
-            />
-          </Box>
-        </Box>
+    // The block shown enlarged, or null for the whole plan. Both views draw the
+    // same tree, every block in its place and the others hidden while one is
+    // enlarged, so the Expand/Back button the person pressed stays the same
+    // element and the pane keeps the keyboard.
+    const zi = z && Svg && typeof z.index === 'number' && list[z.index]?.kind === 'svg' ? z.index : null
+    const scale = z?.scale ?? 1
+    const rows = Math.max(10, (e.viewport?.rows ?? 40) - 1)
+    const columns = e.viewport?.columns ?? 80
+    const step = (by: number) => async () => {
+      await update($, zoom, cur =>
+        cur ? { ...cur, scale: SCALES[Math.min(SCALES.length - 1, Math.max(0, SCALES.indexOf(cur.scale) + by))] ?? cur.scale } : cur,
       )
     }
 
@@ -425,33 +422,81 @@ export const register: Register = on => {
         {problem && <Text color="red">{problem}</Text>}
         {!path && <Text dimColor>Run /mermaid-preview &lt;file.md&gt; to preview a file.</Text>}
         {path && list.length === 0 && !problem && <Text dimColor>Rendering…</Text>}
-        {list.map((b, i) =>
-          b.kind === 'md' ? (
-            <Markdown key={`md-${i}`} text={b.text} />
-          ) : b.kind === 'svg' && Svg ? (
-            <Box key={`svg-${i}`} flexDirection="column">
-              <Box flexDirection="row" justifyContent="flex-end">
+        {list.map((b, i) => {
+          const isZoomed = zi === i
+          const display = zi === null || isZoomed ? ('flex' as const) : ('none' as const)
+          if (b.kind === 'md') {
+            return (
+              <Box key={`block-${i}`} flexDirection="column" display={display}>
+                <Markdown text={b.text} />
+              </Box>
+            )
+          }
+          if (b.kind === 'err') {
+            return (
+              <Box key={`block-${i}`} flexDirection="column" display={display}>
+                <Text color="red">Mermaid error: {b.message}</Text>
+                <Code language="mermaid" source={b.code} />
+              </Box>
+            )
+          }
+          if (!Svg) {
+            return (
+              <Box key={`block-${i}`} flexDirection="column" display={display}>
+                <Text dimColor>(Mermaid diagram; open this pane in the desktop app to see it drawn)</Text>
+              </Box>
+            )
+          }
+          const width = Math.round((b.width || 800) * scale)
+          const height = Math.round((b.height || 600) * scale)
+          // Centre only what fits (cells taken at their smallest, 7 by 16 px):
+          // a flex-centred drawing larger than its box is cut off on both sides.
+          const fitsAcross = width <= (columns - 4) * 7
+          const fitsDown = height <= (rows - 4) * 16
+
+          return (
+            <Box
+              key={`block-${i}`}
+              flexDirection="column"
+              display={display}
+              {...(isZoomed ? { gap: 1, ...(fitsDown ? { height: rows } : {}) } : {})}
+            >
+              <Box flexDirection="row" gap={1} alignItems="center" justifyContent={isZoomed ? 'center' : 'flex-end'}>
                 <Button
                   key={`zoom-open-${i}`}
-                  label="⤢ Expand"
+                  label={isZoomed ? '← Back' : '⤢ Expand'}
                   onPress={async () => {
-                    await openZoom($, b)
+                    await toggleZoom($, i)
                   }}
                 />
+                {isZoomed && <Button key="zoom-out" label="−" onPress={step(-1)} />}
+                {isZoomed && <Text>{Math.round(scale * 100)}%</Text>}
+                {isZoomed && <Button key="zoom-in" label="+" onPress={step(1)} />}
+                {isZoomed && (
+                  <Button
+                    key="zoom-reset"
+                    label="100%"
+                    onPress={async () => {
+                      await update($, zoom, cur => (cur ? { ...cur, scale: 1 } : cur))
+                    }}
+                  />
+                )}
               </Box>
-              <Svg source={b.source} alt={b.alt} isInteractive />
+              <Box
+                flexDirection="column"
+                {...(isZoomed
+                  ? {
+                      flexGrow: 1,
+                      justifyContent: fitsDown ? ('center' as const) : ('flex-start' as const),
+                      alignItems: fitsAcross ? ('center' as const) : ('flex-start' as const),
+                    }
+                  : {})}
+              >
+                <Svg source={b.source} alt={b.alt} isInteractive {...(isZoomed ? { width, height } : {})} />
+              </Box>
             </Box>
-          ) : b.kind === 'svg' ? (
-            <Box key={`svg-${i}`} flexDirection="column">
-              <Text dimColor>(Mermaid diagram; open this pane in the desktop app to see it drawn)</Text>
-            </Box>
-          ) : (
-            <Box key={`err-${i}`} flexDirection="column">
-              <Text color="red">Mermaid error: {b.message}</Text>
-              <Code language="mermaid" source={b.code} />
-            </Box>
-          ),
-        )}
+          )
+        })}
       </Box>
     )
   })

@@ -1,6 +1,6 @@
 {
   "name": "mermaid-preview",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Preview Markdown files with their Mermaid diagrams rendered, from a View Plan button under Claude's replies or /mermaid-preview <file.md>",
   "author": { "name": "bizcrew-developer" },
   "types": "./types/index.d.ts"
