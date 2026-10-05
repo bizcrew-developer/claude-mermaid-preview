@@ -4,6 +4,7 @@ The Claude desktop app's Markdown preview shows Mermaid blocks as plain code. Th
 
 - **View Plan button**: under any Claude reply that links a `.md` file containing a Mermaid block, a **View Plan** button opens that file in the preview pane.
 - **`/mermaid-preview <file.md>`**: opens any Markdown file in the pane.
+- **Expand**: each diagram has an Expand button that shows it enlarged in the pane, centred, with zoom controls (50% to 400%) and a Back button.
 - The pane refreshes by itself when the file changes.
 - A diagram with a syntax error shows Mermaid's error and its code.
 
@@ -26,4 +27,4 @@ Then start a new session. Phones viewing a session that runs on one of these com
 ## Notes
 
 - Buttons show in the desktop app and VS Code. The terminal has no buttons, so use `/mermaid-preview` there; diagrams are drawn only on surfaces that support images.
-- Diagrams are drawn exactly as written, with their own theme and colours on a transparent background.
+- Diagrams are drawn as written, with their own theme and colours. Dark-theme diagrams get a dark background matching the pane; others get white.

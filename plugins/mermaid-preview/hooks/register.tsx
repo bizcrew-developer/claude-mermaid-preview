@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Block } from '../types'
+import type { Block, Zoom } from '../types'
 
 const PANE = 'mermaid-preview'
 const SVG_LIMIT = 131072
@@ -10,6 +10,9 @@ const MMDC_PACKAGE = '@mermaid-js/mermaid-cli'
 const file = atom({ plugin: 'mermaid-preview', key: 'file' } as const, null)
 const blocks = atom({ plugin: 'mermaid-preview', key: 'blocks' } as const, [])
 const error = atom({ plugin: 'mermaid-preview', key: 'error' } as const, null)
+const zoom = atom({ plugin: 'mermaid-preview', key: 'zoom' } as const, null)
+
+const SCALES = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4]
 
 type Segment = { kind: 'md'; text: string } | { kind: 'mermaid'; code: string }
 
@@ -37,6 +40,29 @@ function cleanError(stderr: string): string {
   const end = lines.findIndex(l => /^\s*(at |Parser\.)/.test(l))
   const kept = (end === -1 ? lines : lines.slice(0, end)).join('\n').trim()
   return (kept || 'mmdc produced no SVG').slice(0, 1000)
+}
+
+// The desktop draws an Svg on a white box, so a transparent diagram shows on
+// white. A diagram written for Mermaid's dark theme gets the pane's own dark
+// colour behind it instead; every other diagram keeps white, which its dark
+// text needs.
+function background(code: string): string {
+  return /%%\{\s*init:[^}]*['"]?theme['"]?\s*:\s*['"]dark['"]/.test(code) ? '#1a1a1a' : 'white'
+}
+
+// Mermaid writes width="100%" with a max-width, which leaves the desktop's box
+// to guess a height: a tall diagram shrank into a short box with white beside
+// it. Give the markup its own size from the viewBox, so the box fits it exactly.
+function sizeSvg(svg: string): string {
+  const open = svg.match(/^<svg[^>]*>/)
+  const box = open?.[0].match(/viewBox="[-\d.]+ [-\d.]+ ([\d.]+) ([\d.]+)"/)
+  if (!open || !box) return svg
+  const tag = open[0]
+    .replace(/\swidth="[^"]*"/, '')
+    .replace(/\sheight="[^"]*"/, '')
+    .replace(/max-width:\s*[\d.]+px;?\s*/, '')
+    .replace(/^<svg/, `<svg width="${Math.ceil(+box[1])}" height="${Math.ceil(+box[2])}"`)
+  return tag + svg.slice(open[0].length)
 }
 
 function dirname(path: string): string {
@@ -147,16 +173,23 @@ async function renderDiagram($: EngineInterface, code: string): Promise<Block> {
     const sep = isWindows ? '\\' : '/'
     const config = `${$.plugin.root}${sep}hooks${sep}mermaid-config.json`
     const r = await $.process.run(
-      [...mmdc.argv, '-i', '-', '-o', '-', '-e', 'svg', '-b', 'transparent', '-c', config],
+      [...mmdc.argv, '-i', '-', '-o', '-', '-e', 'svg', '-b', background(code), '-c', config],
       { stdin: code, timeoutMs: 60000, ...(mmdc.env ? { env: mmdc.env } : {}) },
     )
-    const svg = r.stdout.slice(r.stdout.indexOf('<svg'))
+    const svg = sizeSvg(r.stdout.slice(r.stdout.indexOf('<svg')))
     if (r.exitCode !== 0 || !svg.startsWith('<svg')) {
       block = { kind: 'err', code, message: cleanError(r.stderr) }
     } else if (svg.length > SVG_LIMIT) {
       block = { kind: 'err', code, message: `Diagram SVG is ${svg.length} characters, over the ${SVG_LIMIT} limit.` }
     } else {
-      block = { kind: 'svg', source: svg, alt: `Mermaid diagram: ${code.trim().split('\n')[0]}` }
+      const size = svg.match(/^<svg width="(\d+)" height="(\d+)"/)
+      block = {
+        kind: 'svg',
+        source: svg,
+        alt: `Mermaid diagram: ${code.trim().split('\n')[0]}`,
+        width: size ? +size[1] : 800,
+        height: size ? +size[2] : 600,
+      }
     }
   } catch (err) {
     block = { kind: 'err', code, message: String(err) }
@@ -228,11 +261,15 @@ async function openPreview($: EngineInterface, arg: string): Promise<string> {
     return `File not found: ${arg}`
   }
   await update($, file, () => path)
+  await update($, blocks, () => [])
   lastText = null
   installError = null
-  await render($, true)
-  await $.ui.open({ id: PANE, title: `Mermaid: ${basename(path)}` })
+  // Open first, within the press or command, then draw: mmdc can take seconds.
+  await update($, zoom, () => null)
+  // `focus` lets the first tap in the pane press a button instead of focusing it.
+  await $.ui.open({ id: PANE, title: `Mermaid: ${basename(path)}`, focus: true })
   watch($)
+  await render($, true)
 
   return `Mermaid preview of ${basename(path)} opened.`
 }
@@ -263,6 +300,14 @@ async function withMermaid($: EngineInterface, path: string): Promise<boolean> {
   }
   hasMermaid.set(path, { at: now, yes })
   return yes
+}
+
+// Shows one diagram enlarged in the plan pane itself. A separate pane either
+// took the focus (so the next Expand cost an extra tap) or stayed behind its tab.
+async function openZoom($: EngineInterface, b: Block) {
+  if (b.kind !== 'svg') return
+  const z: Zoom = { source: b.source, alt: b.alt, width: b.width || 800, height: b.height || 600, scale: 1 }
+  await update($, zoom, () => z)
 }
 
 export const register: Register = on => {
@@ -316,8 +361,8 @@ export const register: Register = on => {
             <Button
               key={`mermaid-open-${i}-${p}`}
               label={paths.length === 1 ? 'View Plan' : `View Plan: ${basename(p)}`}
-              onPress={() => {
-                void openPreview($, p)
+              onPress={async () => {
+                await openPreview($, p)
               }}
             />
           ))}
@@ -327,11 +372,53 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Markdown, Code } = $.ui.resolve(e)
+    const { Box, Text, Markdown, Code, Button } = $.ui.resolve(e)
     const Svg = e.surface === 'terminal' ? null : ($.ui.resolve(e) as any).Svg
     const list = await read($, blocks)
     const problem = await read($, error)
     const path = await read($, file)
+    const z = await read($, zoom)
+
+    if (z && Svg) {
+      const step = (by: number) => async () => {
+        await update($, zoom, cur =>
+          cur ? { ...cur, scale: SCALES[Math.min(SCALES.length - 1, Math.max(0, SCALES.indexOf(cur.scale) + by))] } : cur,
+        )
+      }
+
+      return (
+        <Box flexDirection="column" gap={1} height={Math.max(10, (e.viewport?.rows ?? 40) - 1)}>
+          <Box flexDirection="row" gap={1} alignItems="center" justifyContent="center">
+            <Button
+              key="zoom-back"
+              label="← Back"
+              onPress={async () => {
+                await update($, zoom, () => null)
+              }}
+            />
+            <Button key="zoom-out" label="−" onPress={step(-1)} />
+            <Text>{Math.round(z.scale * 100)}%</Text>
+            <Button key="zoom-in" label="+" onPress={step(1)} />
+            <Button
+              key="zoom-reset"
+              label="100%"
+              onPress={async () => {
+                await update($, zoom, cur => (cur ? { ...cur, scale: 1 } : cur))
+              }}
+            />
+          </Box>
+          <Box flexGrow={1} flexDirection="column" justifyContent="center" alignItems="center">
+            <Svg
+              source={z.source}
+              alt={z.alt}
+              width={Math.round(z.width * z.scale)}
+              height={Math.round(z.height * z.scale)}
+              isInteractive
+            />
+          </Box>
+        </Box>
+      )
+    }
 
     return (
       <Box flexDirection="column" gap={1}>
@@ -342,7 +429,18 @@ export const register: Register = on => {
           b.kind === 'md' ? (
             <Markdown key={`md-${i}`} text={b.text} />
           ) : b.kind === 'svg' && Svg ? (
-            <Svg key={`svg-${i}`} source={b.source} alt={b.alt} isInteractive />
+            <Box key={`svg-${i}`} flexDirection="column">
+              <Box flexDirection="row" justifyContent="flex-end">
+                <Button
+                  key={`zoom-open-${i}`}
+                  label="⤢ Expand"
+                  onPress={async () => {
+                    await openZoom($, b)
+                  }}
+                />
+              </Box>
+              <Svg source={b.source} alt={b.alt} isInteractive />
+            </Box>
           ) : b.kind === 'svg' ? (
             <Box key={`svg-${i}`} flexDirection="column">
               <Text dimColor>(Mermaid diagram; open this pane in the desktop app to see it drawn)</Text>
