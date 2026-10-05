@@ -46,6 +46,92 @@ function cleanError(stderr: string): string {
 // white. A diagram written for Mermaid's dark theme gets the pane's own dark
 // colour behind it instead; every other diagram keeps white, which its dark
 // text needs.
+// Every string the pane draws (a Markdown's text, a Code's source, a Text's
+// string) is refused past 10,000 characters or with a control character other
+// than tab and newline, and one refused element leaves the whole pane undrawn.
+const TEXT_LIMIT = 10000
+const MD_PIECE = 9000
+
+// Windows line endings to newlines; terminal colour codes and other control
+// characters dropped.
+function cleanText(text: string): string {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '')
+}
+
+function capText(text: string, limit = TEXT_LIMIT): string {
+  const clean = cleanText(text)
+  if (clean.length <= limit) return clean
+  let cut = limit - 1
+  if (/[\ud800-\udbff]/.test(clean.charAt(cut - 1))) cut -= 1
+  return `${clean.slice(0, cut)}…`
+}
+
+// A line longer than a piece, cut into parts (never between a surrogate pair).
+function cutLine(line: string, max: number): string[] {
+  if (line.length <= max) return [line]
+  const parts: string[] = []
+  let at = 0
+  while (at < line.length) {
+    let end = Math.min(at + max, line.length)
+    if (end < line.length && /[\ud800-\udbff]/.test(line.charAt(end - 1))) end -= 1
+    parts.push(line.slice(at, end))
+    at = end
+  }
+  return parts
+}
+
+// Cuts markdown into pieces a Markdown element takes: at the last blank line
+// outside a code fence where it can (never right under a heading, which stays
+// with what it heads); inside a fence that has to be cut, by closing the fence
+// and opening it again at the top of the next piece.
+function chunkMarkdown(text: string, limit = MD_PIECE): string[] {
+  if (text.length <= limit) return [text]
+  const out: string[] = []
+  const push = (piece: string) => {
+    if (piece.trim()) out.push(piece)
+  }
+  let cur = ''
+  let blankAt = -1 // just past the last blank line outside a fence, in `cur`
+  let isUnderHeading = false
+  let fence: { open: string; mark: string } | null = null
+  for (const line of text.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
+    for (const part of cutLine(line, limit - 200)) {
+      if (cur.length + part.length > limit && blankAt > 0) {
+        push(cur.slice(0, blankAt))
+        cur = cur.slice(blankAt)
+        blankAt = -1
+      }
+      if (cur.length + part.length > limit) {
+        if (fence) {
+          push(`${cur}${cur.endsWith('\n') ? '' : '\n'}${fence.mark}\n`)
+          cur = fence.open
+        } else {
+          push(cur)
+          cur = ''
+        }
+        blankAt = -1
+      }
+      cur += part
+    }
+    const bare = line.replace(/\n$/, '')
+    if (fence) {
+      const mark = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(bare)?.[1]
+      if (mark && mark[0] === fence.mark[0] && mark.length >= fence.mark.length) fence = null
+    } else {
+      const mark = /^ {0,3}(`{3,}|~{3,})/.exec(bare)?.[1]
+      if (mark) fence = { open: line.endsWith('\n') ? line : `${line}\n`, mark }
+      else if (!bare.trim()) {
+        if (!isUnderHeading) blankAt = cur.length
+      } else isUnderHeading = /^ {0,3}#{1,6}(\s|$)/.test(bare)
+    }
+  }
+  push(cur)
+  return out
+}
+
 function background(code: string): string {
   return /%%\{\s*init:[^}]*['"]?theme['"]?\s*:\s*['"]dark['"]/.test(code) ? '#1a1a1a' : 'white'
 }
@@ -178,21 +264,21 @@ async function renderDiagram($: EngineInterface, code: string): Promise<Block> {
     )
     const svg = sizeSvg(r.stdout.slice(r.stdout.indexOf('<svg')))
     if (r.exitCode !== 0 || !svg.startsWith('<svg')) {
-      block = { kind: 'err', code, message: cleanError(r.stderr) }
+      block = { kind: 'err', code: capText(code), message: capText(cleanError(r.stderr), 2000) }
     } else if (svg.length > SVG_LIMIT) {
-      block = { kind: 'err', code, message: `Diagram SVG is ${svg.length} characters, over the ${SVG_LIMIT} limit.` }
+      block = { kind: 'err', code: capText(code), message: `Diagram SVG is ${svg.length} characters, over the ${SVG_LIMIT} limit.` }
     } else {
       const size = svg.match(/^<svg width="(\d+)" height="(\d+)"/)
       block = {
         kind: 'svg',
         source: svg,
-        alt: `Mermaid diagram: ${code.trim().split('\n')[0]}`,
+        alt: capText(`Mermaid diagram: ${code.trim().split('\n')[0] ?? ''}`, 200),
         width: Number(size?.[1] ?? 800),
         height: Number(size?.[2] ?? 600),
       }
     }
   } catch (err) {
-    block = { kind: 'err', code, message: String(err) }
+    block = { kind: 'err', code: capText(code), message: capText(String(err), 2000) }
   }
   cache.set(code, block)
   return block
@@ -203,9 +289,9 @@ async function renderNow($: EngineInterface, force: boolean) {
   if (!path) return
   let text: string
   try {
-    text = await $.fs.read(path)
+    text = cleanText(await $.fs.read(path))
   } catch (err) {
-    await update($, error, () => `Cannot read ${path}: ${String(err)}`)
+    await update($, error, () => capText(`Cannot read ${path}: ${String(err)}`, 2000))
     return
   }
   if (!force && text === lastText) return
@@ -215,15 +301,19 @@ async function renderNow($: EngineInterface, force: boolean) {
   if (segments.some(seg => seg.kind === 'mermaid')) {
     const problem = await ensureMmdc($)
     if (problem) {
-      for (const seg of segments) out.push(seg.kind === 'md' ? seg : { kind: 'err', code: seg.code, message: 'Not drawn: mmdc is unavailable.' })
+      for (const seg of segments) {
+        if (seg.kind === 'md') for (const piece of chunkMarkdown(seg.text)) out.push({ kind: 'md', text: piece })
+        else out.push({ kind: 'err', code: capText(seg.code), message: 'Not drawn: mmdc is unavailable.' })
+      }
       await update($, blocks, () => out)
-      await update($, error, () => problem)
+      await update($, error, () => capText(problem, 2000))
       lastText = null
       return
     }
   }
   for (const seg of segments) {
-    out.push(seg.kind === 'md' ? seg : await renderDiagram($, seg.code))
+    if (seg.kind === 'md') for (const piece of chunkMarkdown(seg.text)) out.push({ kind: 'md', text: piece })
+    else out.push(await renderDiagram($, seg.code))
   }
   await update($, blocks, () => out)
   await update($, error, () => null)
@@ -324,14 +414,24 @@ async function toggleZoom($: EngineInterface, index: number) {
   const cur = await read($, zoom)
   const isOpening = !(cur && cur.index === index)
   await update($, zoom, () => (isOpening ? { index, scale: 1 } : null))
-  await keepFocus($, key)
+  // The view has switched; focus and scroll are extras, so neither one failing
+  // stops the other.
+  try {
+    await keepFocus($, key)
+  } catch {
+    // the ring stays where it was
+  }
   // Bring the diagram's row to the top: the enlarged view starts there, and
   // Back returns to the diagram instead of the top of the plan. Right after
   // the pane reopens the key can briefly read as undrawn, so retry once.
-  const scrolled = await $.ui.scroll({ to: { key }, in: PANE, block: 'start' })
-  if (scrolled.deny) {
-    await $.clock.sleep(250)
-    await $.ui.scroll({ to: { key }, in: PANE, block: 'start' })
+  try {
+    const scrolled = await $.ui.scroll({ to: { key }, in: PANE, block: 'start' })
+    if (scrolled.deny) {
+      await $.clock.sleep(250)
+      await $.ui.scroll({ to: { key }, in: PANE, block: 'start' })
+    }
+  } catch {
+    // the window stays where it was
   }
 }
 

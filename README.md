@@ -28,3 +28,11 @@ Then start a new session. Phones viewing a session that runs on one of these com
 
 - Buttons show in the desktop app and VS Code. The terminal has no buttons, so use `/mermaid-preview` there; diagrams are drawn only on surfaces that support images.
 - Diagrams are drawn as written, with their own theme and colours. Dark-theme diagrams get a dark background matching the pane; others get white.
+
+## Development
+
+The tests draw the pane through Claude Code's own plugin test runner, on the desktop, VS Code, mobile and terminal surfaces, and fail if the engine would refuse to draw it:
+
+```bash
+claude plugin test plugins/mermaid-preview
+```
