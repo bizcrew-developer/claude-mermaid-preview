@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "mermaid-preview",
+  "description": "Mermaid diagram preview for Markdown files in Claude Code",
+  "owner": { "name": "bizcrew-developer" },
+  "plugins": [
+    {
+      "name": "mermaid-preview",
+      "description": "Preview Markdown files with their Mermaid diagrams rendered",
+      "version": "1.0.0",
+      "source": "./plugins/mermaid-preview"
+    }
+  ]
+}
